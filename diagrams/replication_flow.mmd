@@ -1,0 +1,23 @@
+flowchart LR
+    %% Styles
+    classDef primary fill:#ffedcc,stroke:#ff9900,stroke-width:2px;
+    classDef secondary fill:#ccffcc,stroke:#00cc66,stroke-width:2px;
+    classDef job fill:#f9f9f9,stroke:#333,stroke-width:1px,stroke-dasharray: 5 5;
+
+    subgraph Primary Node [Primary Instance: localhost,14333]
+        CORE[(CoreDB)]:::primary
+    end
+
+    subgraph Secondary Node [Secondary Instance: localhost,14344]
+        REPORT[(ReportDB\nEmployees_Sync Table)]:::secondary
+        METRICS[(ReportDB\nSalaryMetrics Table)]:::secondary
+    end
+
+    %% High-Frequency Sync (30 Min)
+    CORE -- "1. High-Frequency Sync (30 Min)\nAgent Job: Push Data via Linked Server" --> REPORT
+
+    %% Midnight Transform
+    REPORT -- "2. Analytical Transform (12:00 AM)\nSimulated 1-Hour Process" --> METRICS
+
+    %% Reverse Sync
+    METRICS -- "3. Reverse Sync (01:00 AM)\nAgent Job: Push Analytics back to CoreDB" --> CORE

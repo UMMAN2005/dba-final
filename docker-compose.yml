@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  DBA_PRIMARY:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: dba_primary_node
+    hostname: dba_primary
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=StrongP@ssw0rd!2026
+      - MSSQL_AGENT_ENABLED=true
+      - MSSQL_PID=Developer
+    ports:
+      - "14333:1433"
+    volumes:
+      - sql_primary_data:/var/opt/mssql
+      - ./scripts:/scripts
+
+  DBA_SECONDARY:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: dba_secondary_node
+    hostname: dba_secondary
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=StrongP@ssw0rd!2026
+      - MSSQL_AGENT_ENABLED=true
+      - MSSQL_PID=Developer
+    ports:
+      - "14344:1433"
+    volumes:
+      - sql_secondary_data:/var/opt/mssql
+      - ./scripts:/scripts
+
+volumes:
+  sql_primary_data:
+  sql_secondary_data:

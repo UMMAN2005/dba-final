@@ -1,0 +1,41 @@
+flowchart TD
+    %% Define Styles
+    classDef hot fill:#ffcccc,stroke:#ff0000,stroke-width:2px;
+    classDef cold fill:#cce5ff,stroke:#0000ff,stroke-width:2px;
+    classDef archive fill:#e6ccff,stroke:#800080,stroke-width:2px;
+    classDef process fill:#f9f9f9,stroke:#333,stroke-width:1px;
+    classDef disk fill:#d9ead3,stroke:#333,stroke-width:1px,stroke-dasharray: 5 5;
+
+    %% Database Tiers
+    subgraph Primary Instance
+        DB_HOT[(CoreDB\nTier: Hot)]:::hot
+        DB_COLD[(StagingDB\nTier: Cold)]:::cold
+    end
+
+    subgraph Secondary Instance
+        DB_ARCHIVE[(ReportDB\nTier: Archive)]:::archive
+    end
+
+    %% Storage
+    STORAGE[(Backup Storage\n/var/opt/mssql/data)]:::disk
+
+    %% Hot Tier Processes
+    DB_HOT --> P_HOT_FULL[Daily Full Backup\n00:00]:::process
+    DB_HOT --> P_HOT_DIFF[Daily Diff Backup\n06:00]:::process
+    DB_HOT --> P_HOT_LOG[15-Min T-Log Backup]:::process
+
+    P_HOT_FULL --> STORAGE
+    P_HOT_DIFF --> STORAGE
+    P_HOT_LOG --> STORAGE
+
+    %% Cold Tier Processes
+    DB_COLD --> P_COLD_FULL[Weekly Full Backup\nSun 01:00]:::process
+    DB_COLD --> P_COLD_DIFF[Weekly Diff Backup\nWed 01:00]:::process
+
+    P_COLD_FULL --> STORAGE
+    P_COLD_DIFF --> STORAGE
+
+    %% Archive Tier Processes
+    DB_ARCHIVE --> P_ARCHIVE_FULL[Monthly Full Backup\n1st Day 02:00]:::process
+
+    P_ARCHIVE_FULL --> STORAGE
