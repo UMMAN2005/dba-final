@@ -36,11 +36,18 @@ GO
 USE msdb;
 GO
 
+IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'MIDNIGHT_DATA_FLOW')
+BEGIN
+    EXEC msdb.dbo.sp_delete_job @job_name = N'MIDNIGHT_DATA_FLOW';
+END
+GO
+
 EXEC dbo.sp_add_job @job_name = N'MIDNIGHT_DATA_FLOW', @enabled = 1;
 
 EXEC dbo.sp_add_jobstep @job_name = N'MIDNIGHT_DATA_FLOW', @step_name = N'TRANSFORM',
     @command = N'
-    WAITFOR DELAY ''00:00:05''; 
+    -- Simulated analytical processing window (1 hour)
+    WAITFOR DELAY ''01:00:00''; 
     IF OBJECT_ID(''ReportDB.dbo.SalaryMetrics'') IS NOT NULL DROP TABLE ReportDB.dbo.SalaryMetrics;
     SELECT AVG(Salary) as AvgSalary INTO ReportDB.dbo.SalaryMetrics FROM ReportDB.dbo.Employees_Sync;
     ',
