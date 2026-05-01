@@ -1,39 +1,34 @@
-USE [master]
+USE [master];
 GO
 
-IF NOT EXISTS (SELECT * FROM sys.server_principals WHERE name = 'deploy_user')
-BEGIN
+/* 1) DEPLOY USER + RESOURCE GOVERNOR (workload limiting) */
+IF NOT EXISTS (SELECT 1 FROM sys.server_principals WHERE name = N'deploy_user')
     CREATE LOGIN deploy_user WITH PASSWORD = 'StrongP@ssw0rd!2026';
-END
 GO
 
-IF NOT EXISTS (SELECT * FROM sys.resource_governor_resource_pools WHERE name = 'ReportPool')
-BEGIN
-    CREATE RESOURCE POOL ReportPool
-    WITH (MAX_CPU_PERCENT = 20, MAX_MEMORY_PERCENT = 20);
-END
+IF NOT EXISTS (SELECT 1 FROM sys.resource_governor_resource_pools WHERE name = N'ReportPool')
+    CREATE RESOURCE POOL ReportPool WITH (MAX_CPU_PERCENT = 20, MAX_MEMORY_PERCENT = 20);
 GO
 
-IF NOT EXISTS (SELECT * FROM sys.resource_governor_workload_groups WHERE name = 'DeployGroup')
-BEGIN
-    CREATE WORKLOAD GROUP DeployGroup
-    USING ReportPool;
-END
+IF NOT EXISTS (SELECT 1 FROM sys.resource_governor_workload_groups WHERE name = N'DeployGroup')
+    CREATE WORKLOAD GROUP DeployGroup USING ReportPool;
 GO
 
-IF OBJECT_ID('dbo.RG_Classifier', 'FN') IS NOT NULL
+IF OBJECT_ID(N'dbo.RG_Classifier', N'FN') IS NOT NULL
     DROP FUNCTION dbo.RG_Classifier;
 GO
 
-CREATE FUNCTION dbo.RG_Classifier() 
+CREATE FUNCTION dbo.RG_Classifier()
 RETURNS SYSNAME WITH SCHEMABINDING
 AS
 BEGIN
     DECLARE @CurrTime TIME = CAST(GETDATE() AS TIME);
-    IF (SUSER_SNAME() = 'deploy_user' AND @CurrTime BETWEEN '00:00:00' AND '01:00:00')
-        RETURN 'DeployGroup';
-    
-    RETURN 'default';
+
+    IF SUSER_SNAME() = N'deploy_user'
+       AND @CurrTime >= '00:00:00' AND @CurrTime < '01:00:00'
+        RETURN N'DeployGroup';
+
+    RETURN N'default';
 END;
 GO
 
@@ -41,128 +36,123 @@ ALTER RESOURCE GOVERNOR WITH (CLASSIFIER_FUNCTION = dbo.RG_Classifier);
 ALTER RESOURCE GOVERNOR RECONFIGURE;
 GO
 
-IF OBJECT_ID('master.dbo.Session_Tracking_Log', 'U') IS NULL
+/* 2) RESTRICT deploy_user ONLY ON ReportDB (00:00-01:00) */
+IF DB_ID(N'ReportDB') IS NOT NULL
 BEGIN
-    CREATE TABLE master.dbo.Session_Tracking_Log
-    (
-        LogID INT IDENTITY(1,1) PRIMARY KEY,
-        CaptureTime DATETIME2 NOT NULL DEFAULT SYSDATETIME(),
-        SessionID INT NOT NULL,
-        LoginName SYSNAME NULL,
-        HostName NVARCHAR(128) NULL,
-        ProgramName NVARCHAR(256) NULL,
-        DatabaseName SYSNAME NULL,
-        Status NVARCHAR(60) NULL,
-        WaitType NVARCHAR(120) NULL,
-        BlockingSessionID INT NULL,
-        CpuTimeMs INT NULL,
-        LogicalReads BIGINT NULL
-    );
+    EXEC(N'USE ReportDB;
+          IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N''deploy_user'')
+              CREATE USER deploy_user FOR LOGIN deploy_user;');
 END
 GO
 
-IF OBJECT_ID('master.dbo.SP_CAPTURE_ACTIVE_SESSIONS', 'P') IS NOT NULL
-    DROP PROCEDURE master.dbo.SP_CAPTURE_ACTIVE_SESSIONS;
+IF OBJECT_ID(N'master.dbo.SP_RESTRICT_REPORTDB_DEPLOY_USER', N'P') IS NOT NULL
+    DROP PROCEDURE master.dbo.SP_RESTRICT_REPORTDB_DEPLOY_USER;
 GO
-
-CREATE PROCEDURE master.dbo.SP_CAPTURE_ACTIVE_SESSIONS
+CREATE PROCEDURE master.dbo.SP_RESTRICT_REPORTDB_DEPLOY_USER
 AS
 BEGIN
     SET NOCOUNT ON;
 
-    INSERT INTO master.dbo.Session_Tracking_Log
-    (
-        SessionID,
-        LoginName,
-        HostName,
-        ProgramName,
-        DatabaseName,
-        Status,
-        WaitType,
-        BlockingSessionID,
-        CpuTimeMs,
-        LogicalReads
-    )
-    SELECT
-        s.session_id,
-        s.login_name,
-        s.host_name,
-        s.program_name,
-        DB_NAME(r.database_id),
-        s.status,
-        r.wait_type,
-        r.blocking_session_id,
-        r.cpu_time,
-        r.logical_reads
-    FROM sys.dm_exec_sessions s
-    LEFT JOIN sys.dm_exec_requests r
-        ON s.session_id = r.session_id
-    WHERE s.is_user_process = 1;
-END
-GO
+    IF DB_ID(N'ReportDB') IS NULL RETURN;
 
-USE msdb;
-GO
+    EXEC(N'USE ReportDB; DENY CONNECT TO deploy_user;');
 
-IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'TRACK_ACTIVE_SESSIONS')
-BEGIN
-    EXEC msdb.dbo.sp_delete_job @job_name = N'TRACK_ACTIVE_SESSIONS';
-END
-GO
+    DECLARE @sql NVARCHAR(MAX) = N'';
+    SELECT @sql += N'KILL ' + CAST(spid AS NVARCHAR(10)) + N';'
+    FROM master.dbo.sysprocesses
+    WHERE loginame = N'deploy_user' AND DB_NAME(dbid) = N'ReportDB' AND spid <> @@SPID;
 
-EXEC dbo.sp_add_job @job_name = N'TRACK_ACTIVE_SESSIONS', @enabled = 1;
-EXEC dbo.sp_add_jobstep
-    @job_name = N'TRACK_ACTIVE_SESSIONS',
-    @step_name = N'CaptureSessions',
-    @command = N'EXEC master.dbo.SP_CAPTURE_ACTIVE_SESSIONS;',
-    @database_name = N'master';
-EXEC dbo.sp_add_jobschedule
-    @job_name = N'TRACK_ACTIVE_SESSIONS',
-    @name = N'Every_Minute',
-    @freq_type = 4,
-    @freq_interval = 1,
-    @freq_subday_type = 4,
-    @freq_subday_interval = 1;
-EXEC dbo.sp_add_jobserver @job_name = N'TRACK_ACTIVE_SESSIONS', @server_name = N'(LOCAL)';
-GO
-
-USE [master];
-GO
-
-IF OBJECT_ID('master.dbo.TR_RESTRICT_DEPLOY_USER_WINDOW', 'TR') IS NOT NULL
-    DROP TRIGGER master.dbo.TR_RESTRICT_DEPLOY_USER_WINDOW ON ALL SERVER;
-GO
-
-CREATE TRIGGER master.dbo.TR_RESTRICT_DEPLOY_USER_WINDOW
-ON ALL SERVER
-FOR LOGON
-AS
-BEGIN
-    DECLARE @login SYSNAME = ORIGINAL_LOGIN();
-    DECLARE @currTime TIME = CAST(GETDATE() AS TIME);
-
-    IF (@login = N'deploy_user' AND @currTime >= '00:00:00' AND @currTime < '01:00:00')
-    BEGIN
-        ROLLBACK;
-    END
+    IF LEN(@sql) > 0 EXEC(@sql);
 END;
 GO
 
-EXEC sp_configure 'show advanced options', 1;
-RECONFIGURE;
-EXEC sp_configure 'blocked process threshold', 5;
-RECONFIGURE;
+IF OBJECT_ID(N'master.dbo.SP_ALLOW_REPORTDB_DEPLOY_USER', N'P') IS NOT NULL
+    DROP PROCEDURE master.dbo.SP_ALLOW_REPORTDB_DEPLOY_USER;
+GO
+CREATE PROCEDURE master.dbo.SP_ALLOW_REPORTDB_DEPLOY_USER
+AS
+BEGIN
+    SET NOCOUNT ON;
+    IF DB_ID(N'ReportDB') IS NULL RETURN;
+    EXEC(N'USE ReportDB; GRANT CONNECT TO deploy_user;');
+END;
 GO
 
-IF EXISTS (SELECT * FROM sys.server_event_sessions WHERE name = 'CaptureBlocks')
+USE [msdb];
+GO
+
+IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'RESTRICT_DEPLOY_USER_REPORTDB')
+    EXEC msdb.dbo.sp_delete_job @job_name = N'RESTRICT_DEPLOY_USER_REPORTDB';
+GO
+EXEC msdb.dbo.sp_add_job @job_name = N'RESTRICT_DEPLOY_USER_REPORTDB', @enabled = 1;
+EXEC msdb.dbo.sp_add_jobstep @job_name = N'RESTRICT_DEPLOY_USER_REPORTDB', @step_name = N'DenyConnect', @command = N'EXEC master.dbo.SP_RESTRICT_REPORTDB_DEPLOY_USER;';
+EXEC msdb.dbo.sp_add_jobschedule @job_name = N'RESTRICT_DEPLOY_USER_REPORTDB', @name = N'At_00_00', @freq_type = 4, @freq_interval = 1, @active_start_time = 000000;
+EXEC msdb.dbo.sp_add_jobserver @job_name = N'RESTRICT_DEPLOY_USER_REPORTDB', @server_name = N'(LOCAL)';
+GO
+
+IF EXISTS (SELECT 1 FROM msdb.dbo.sysjobs WHERE name = N'ALLOW_DEPLOY_USER_REPORTDB')
+    EXEC msdb.dbo.sp_delete_job @job_name = N'ALLOW_DEPLOY_USER_REPORTDB';
+GO
+EXEC msdb.dbo.sp_add_job @job_name = N'ALLOW_DEPLOY_USER_REPORTDB', @enabled = 1;
+EXEC msdb.dbo.sp_add_jobstep @job_name = N'ALLOW_DEPLOY_USER_REPORTDB', @step_name = N'GrantConnect', @command = N'EXEC master.dbo.SP_ALLOW_REPORTDB_DEPLOY_USER;';
+EXEC msdb.dbo.sp_add_jobschedule @job_name = N'ALLOW_DEPLOY_USER_REPORTDB', @name = N'At_01_00', @freq_type = 4, @freq_interval = 1, @active_start_time = 010000;
+EXEC msdb.dbo.sp_add_jobserver @job_name = N'ALLOW_DEPLOY_USER_REPORTDB', @server_name = N'(LOCAL)';
+GO
+
+/* 3) INCIDENT TRACKING: blocks + deadlocks (real-time capture) */
+USE [master];
+GO
+EXEC sp_configure 'show advanced options', 1; RECONFIGURE;
+EXEC sp_configure 'blocked process threshold', 5; RECONFIGURE;
+GO
+
+IF EXISTS (SELECT 1 FROM sys.server_event_sessions WHERE name = N'CaptureBlocks')
     DROP EVENT SESSION CaptureBlocks ON SERVER;
 GO
-
-CREATE EVENT SESSION CaptureBlocks ON SERVER 
+CREATE EVENT SESSION CaptureBlocks ON SERVER
 ADD EVENT sqlserver.blocked_process_report
-ADD TARGET package0.event_file(SET filename=N'/var/opt/mssql/data/Blocks.xel')
-WITH (STARTUP_STATE=ON);
+ADD TARGET package0.event_file(SET filename = N'/var/opt/mssql/data/Blocks.xel')
+WITH (STARTUP_STATE = ON);
+GO
+
+IF EXISTS (SELECT 1 FROM sys.server_event_sessions WHERE name = N'CaptureDeadlocks')
+    DROP EVENT SESSION CaptureDeadlocks ON SERVER;
+GO
+CREATE EVENT SESSION CaptureDeadlocks ON SERVER
+ADD EVENT sqlserver.xml_deadlock_report
+ADD TARGET package0.event_file(SET filename = N'/var/opt/mssql/data/Deadlocks.xel')
+WITH (STARTUP_STATE = ON);
 GO
 
 ALTER EVENT SESSION CaptureBlocks ON SERVER STATE = START;
+ALTER EVENT SESSION CaptureDeadlocks ON SERVER STATE = START;
+GO
+
+/* 4) EMAIL ALERTS TO ADMIN OPERATOR (DBA_Team) */
+USE [msdb];
+GO
+
+IF EXISTS (SELECT 1 FROM msdb.dbo.sysalerts WHERE name = N'ALERT_DEADLOCK')
+    EXEC msdb.dbo.sp_delete_alert @name = N'ALERT_DEADLOCK';
+GO
+EXEC msdb.dbo.sp_add_alert
+    @name = N'ALERT_DEADLOCK',
+    @message_id = 0, @severity = 0, @enabled = 1,
+    @delay_between_responses = 60, @include_event_description_in = 1,
+    @performance_condition = N'SQLServer:Locks|Number of Deadlocks/sec|_Total|>|0';
+GO
+
+IF EXISTS (SELECT 1 FROM msdb.dbo.sysalerts WHERE name = N'ALERT_BLOCKED_PROCESS')
+    EXEC msdb.dbo.sp_delete_alert @name = N'ALERT_BLOCKED_PROCESS';
+GO
+EXEC msdb.dbo.sp_add_alert
+    @name = N'ALERT_BLOCKED_PROCESS',
+    @message_id = 0, @severity = 0, @enabled = 1,
+    @delay_between_responses = 60, @include_event_description_in = 1,
+    @performance_condition = N'SQLServer:General Statistics|Processes blocked||>|0';
+GO
+
+-- Requires DBA_Team operator already created in mail script
+EXEC msdb.dbo.sp_add_notification @alert_name = N'ALERT_DEADLOCK', @operator_name = N'DBA_Team', @notification_method = 1;
+EXEC msdb.dbo.sp_add_notification @alert_name = N'ALERT_BLOCKED_PROCESS', @operator_name = N'DBA_Team', @notification_method = 1;
 GO
