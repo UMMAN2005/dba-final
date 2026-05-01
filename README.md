@@ -20,7 +20,7 @@ The project implements a distributed SQL Server 2022 architecture leveraging Doc
 
 ## Directory Structure
 *   `docker-compose.yml`: Orchestrates the Primary and Secondary SQL Server instances.
-*   `scripts/`: Contains the sequential T-SQL scripts (01-08) to deploy schemas, agent jobs, replication, mail, governance, and security configurations.
+*   `scripts/`: Contains the sequential T-SQL scripts (01-99) to deploy schemas, agent jobs, replication, maintenance, mail, governance, and security configurations.
 *   `diagrams/`: Contains Mermaid markdown files illustrating the backup workflow and replication data flow.
 
 ## Deployment
